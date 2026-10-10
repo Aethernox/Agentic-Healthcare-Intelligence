@@ -14,6 +14,7 @@ class EvalInput(BaseModel):
     query_text: str
     user_location: UserLocation
     time: str
+    injected_into_facility: Optional[Dict[str, Any]] = None
 
 class Citation(BaseModel):
     facility_name: str
@@ -32,7 +33,9 @@ class FacilityOutput(BaseModel):
     why_not_runner_up: str
 
 class EvalOutput(BaseModel):
+    probe_id: Optional[str] = None
     facilities: List[FacilityOutput]
     abstain: bool
     abstain_reason: Optional[str] = None
-    desert_flags: List[str] = Field(default_factory=list)
+    desert_flags: List[Any] = Field(default_factory=list)
+
