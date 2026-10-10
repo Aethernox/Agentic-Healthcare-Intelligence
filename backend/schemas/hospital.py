@@ -106,6 +106,9 @@ class HospitalResponse(HospitalExtracted):
     tavily_verified: bool = False
     tavily_summary: Optional[str] = None
     distance_km: Optional[float] = None
+    travel_time_min: Optional[int] = None
+    fitness_score: Optional[float] = None
+    clinical_match_reasons: List[str] = Field(default_factory=list)
     validator_verdict: Optional[str] = "PASSED"
     validator_notes: Optional[str] = None
     validator_adjustment: Optional[int] = 0
@@ -115,11 +118,46 @@ class HospitalResponse(HospitalExtracted):
         from_attributes = True
 
 
+class DiagnosticQuestion(BaseModel):
+    id: str
+    question: str
+    options: List[str] = Field(default_factory=list)
+    rationale: Optional[str] = None
+    category: Optional[str] = "clinical_triage"
+
+
+class ClinicalAnalysis(BaseModel):
+    primary_complaint: str
+    urgency_tier: str = "ROUTINE"  # "CRITICAL_EMERGENCY", "URGENT", "SEMI_URGENT", "ROUTINE"
+    urgency_color: str = "emerald"  # "red", "amber", "emerald"
+    differential_diagnosis: List[str] = Field(default_factory=list)
+    confirmed_diagnosis: Optional[str] = None
+    red_flags: List[str] = Field(default_factory=list)
+    required_capabilities: List[str] = Field(default_factory=list)
+    required_equipment: List[str] = Field(default_factory=list)
+    patient_guidance: str = ""
+    clarification_summary: Optional[str] = None
+    questions: List[DiagnosticQuestion] = Field(default_factory=list)
+
+
+class ResolvedLocation(BaseModel):
+    lat: float
+    lng: float
+    address: str
+    city: Optional[str] = None
+    district: Optional[str] = None
+    state: Optional[str] = None
+    source: str = "manual"  # "gps", "manual", "ip_auto", "fallback"
+
+
 class SearchRequest(BaseModel):
-    query: str = Field(..., min_length=3, max_length=500)
+    query: str = Field(..., min_length=2, max_length=500)
+    user_location: Optional[str] = None  # e.g. "Patna", "Saharsa, Bihar", "852200", "Lalganj"
     lat: Optional[float] = None
     lng: Optional[float] = None
     radius_km: Optional[float] = None
+    auto_detect_location: Optional[bool] = False
+    diagnostic_answers: Optional[Dict[str, str]] = None
     max_results: int = Field(default=10, ge=1, le=50)
     min_trust_score: Optional[int] = Field(default=None, ge=0, le=100)
     scenario: Optional[str] = None  # e.g., "ananya_emergency"
@@ -136,9 +174,13 @@ class AgentStep(BaseModel):
 
 class SearchResponse(BaseModel):
     query: str
+    user_location: Optional[ResolvedLocation] = None
     clinical_intent: Optional[Dict[str, Any]] = None
+    clinical_analysis: Optional[ClinicalAnalysis] = None
+    diagnostic_questions: List[DiagnosticQuestion] = Field(default_factory=list)
     results: List[HospitalResponse]
     total: int
     agent_steps: List[AgentStep] = Field(default_factory=list)
     validator_summary: Optional[Dict[str, Any]] = None
     mlflow_run_id: Optional[str] = None
+

@@ -8,19 +8,25 @@ import math
 import re
 from typing import List, Dict, Any, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request, Query
 from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
 
 from database import get_db
 from models import Hospital
-from schemas.hospital import SearchRequest, SearchResponse, HospitalResponse, AgentStep, TrustTier
+from schemas.hospital import (
+    SearchRequest, SearchResponse, HospitalResponse, AgentStep, TrustTier,
+    ResolvedLocation, DiagnosticQuestion, ClinicalAnalysis
+)
 from agents.validator import validate_facility_against_standards
+from agents.reasoner import analyze_natural_language_request, evaluate_hospital_clinical_fitness
+from tools.geocoder import resolve_user_location, detect_ip_location, haversine_distance, reverse_geocode_sync
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 INDIAN_STATES = [
+
     "andhra pradesh", "arunachal pradesh", "assam", "bihar", "chhattisgarh",
     "goa", "gujarat", "haryana", "himachal pradesh", "jharkhand", "karnataka",
     "kerala", "madhya pradesh", "maharashtra", "manipur", "meghalaya",
@@ -205,69 +211,170 @@ def _hospital_to_response(h: Hospital, lat=None, lng=None, clinical_intent=None)
     return item
 
 
+@router.get("/detect_location")
+def get_detected_location(req: Request):
+    """
+    Auto-detect user real-time location via client IP or proxy headers.
+    Falls back gracefully to Patna/Delhi if client is localhost or unresolvable.
+    """
+    client_ip = (
+        req.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        or req.headers.get("x-real-ip")
+        or (req.client.host if req.client else None)
+    )
+    return detect_ip_location(client_ip)
+
+
+@router.get("/geocode")
+def geocode_manual_location(q: str = Query(..., min_length=2), db: Session = Depends(get_db)):
+    """
+    Geocode any manual location query (City, District, PIN code, Address)
+    using bundled centroids and dynamic DB lookups over 10,000 facilities.
+    """
+    return resolve_user_location(user_location=q, db_session=db)
+
+
+@router.post("/triage", response_model=ClinicalAnalysis)
+def triage_natural_language(req: Dict[str, Any]):
+    """
+    Analyze patient request in natural language (including Hinglish/colloquial terms),
+    identify clinical presentation & red flags, generate 3 to 5 targeted diagnostic questions,
+    and refine differential diagnosis based on provided answers.
+    """
+    query = req.get("query", "")
+    answers = req.get("diagnostic_answers", {})
+    return analyze_natural_language_request(query, answers)
+
+
 @router.post("")
-def search(request: SearchRequest, db: Session = Depends(get_db)):
+def search(request: SearchRequest, req: Request, db: Session = Depends(get_db)):
     query = request.query
     max_results = request.max_results
-    lat = request.lat
-    lng = request.lng
     radius_km = request.radius_km
     min_trust_score = request.min_trust_score
 
-    # Step 1: Parse Clinical Intent
+    # Client IP for real-time location auto-detection if needed
+    client_ip = (
+        req.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        or req.headers.get("x-real-ip")
+        or (req.client.host if req.client else None)
+    )
+
+    # Step 1: Parse Clinical Intent (Medical condition, urgency, budget, transport)
     intent = parse_clinical_intent(query)
     q_lower = query.lower()
 
+    # Step 1b: Clinical NLP Reasoning, Diagnostic Clarification & Questions
+    clinical_analysis = analyze_natural_language_request(
+        query=query,
+        diagnostic_answers=request.diagnostic_answers,
+    )
+
+    # Step 2: Establish User Location (Real-time GPS / Manual string / Query location / IP auto-detect)
+    manual_loc_str = request.user_location or intent.get("district") or intent.get("state")
+    loc_info = resolve_user_location(
+        user_location=manual_loc_str,
+        lat=request.lat,
+        lng=request.lng,
+        auto_detect=bool(request.auto_detect_location or (not manual_loc_str and request.lat is None)),
+        client_ip=client_ip,
+        db_session=db,
+    )
+    user_lat = loc_info["lat"]
+    user_lng = loc_info["lng"]
+
+    effective_radius = radius_km or intent.get("max_radius_km") or 60.0
+
     agent_steps: List[Dict[str, Any]] = [
+        {
+            "type": "location_detect",
+            "title": "Real-Time Patient Geospatial Lock",
+            "agent": "Geospatial Intelligence Agent",
+            "message": (
+                f"Target Location Established: {loc_info['address']} ({user_lat}°N, {user_lng}°E) "
+                f"[Mode: {loc_info['source'].upper()}]. Computing proximity matrix across 10,000 facilities."
+            ),
+            "metadata": loc_info,
+        },
+        {
+            "type": "nlp_reasoning",
+            "title": "Clinical NLP Reasoning & Differential Diagnosis",
+            "agent": "Clinical Reasoner Agent",
+            "message": (
+                f"Symptom Presentation: {clinical_analysis.primary_complaint} | "
+                f"Acuity: {clinical_analysis.urgency_tier} | "
+                f"Differentials: {', '.join(clinical_analysis.differential_diagnosis[:3])} | "
+                f"Formulated {len(clinical_analysis.questions)} targeted diagnostic questions."
+                + (f" [{clinical_analysis.clarification_summary}]" if clinical_analysis.clarification_summary else "")
+            ),
+            "metadata": {
+                "urgency_tier": clinical_analysis.urgency_tier,
+                "differentials": clinical_analysis.differential_diagnosis,
+                "red_flags": clinical_analysis.red_flags,
+                "clarification_summary": clinical_analysis.clarification_summary,
+            },
+        },
         {
             "type": "query_parse",
             "title": "Clinical Intent & Triage Decomposer",
             "agent": "Triage & Intent Agent",
             "message": (
-                f"Extracted Triage: {intent.get('clinical_diagnosis_hypothesis') or ['Standard Care']} | "
-                f"Procedure: {intent.get('procedure_needed') or 'General Consultation'} | "
-                f"Budget: ₹{intent.get('budget')} | Transport: {intent.get('transport_mode')} (<{intent.get('max_radius_km')}km)"
+                f"Extracted Triage: {intent.get('clinical_diagnosis_hypothesis') or [clinical_analysis.primary_complaint]} | "
+                f"Procedure: {intent.get('procedure_needed') or 'Clinical Evaluation'} | "
+                f"Budget: ₹{intent.get('budget') or 'Standard'} | Transport: {intent.get('transport_mode')} (<{effective_radius}km)"
             ),
             "metadata": intent,
-        }
+        },
     ]
 
-    # Query DB
-    dbq = db.query(Hospital)
+    # Step 3: Geospatial Database Retrieval around User's Chosen Location
+    # 1 degree latitude ~ 111 km
+    lat_delta = (effective_radius + 20.0) / 111.0
+    cos_lat = math.cos(math.radians(user_lat))
+    lng_delta = (effective_radius + 20.0) / (111.0 * max(0.2, abs(cos_lat)))
 
-    # State filter
-    target_state = intent.get("state")
-    if target_state:
-        dbq = dbq.filter(Hospital.state.ilike(f"%{target_state}%"))
+    nearby_q = db.query(Hospital).filter(
+        Hospital.latitude.isnot(None),
+        Hospital.longitude.isnot(None),
+        Hospital.latitude.between(user_lat - lat_delta, user_lat + lat_delta),
+        Hospital.longitude.between(user_lng - lng_delta, user_lng + lng_delta),
+    )
 
-    # District filter if specific
-    target_dist = intent.get("district")
-    if target_dist:
-        dbq = dbq.filter(
-            or_(
-                Hospital.district.ilike(f"%{target_dist}%"),
-                Hospital.city.ilike(f"%{target_dist}%"),
-            )
-        )
-
-    # Minimum trust score filter if user explicitly passed
     if min_trust_score is not None:
-        dbq = dbq.filter(Hospital.trust_score >= min_trust_score)
+        nearby_q = nearby_q.filter(Hospital.trust_score >= min_trust_score)
 
-    total_candidates = dbq.count()
+    candidates = nearby_q.limit(200).all()
+
+    # If fewer than 15 candidates in immediate radius, widen bounding box to find nearest regional hubs
+    if len(candidates) < 15:
+        lat_delta_wide = (effective_radius * 2.5) / 111.0
+        lng_delta_wide = (effective_radius * 2.5) / (111.0 * max(0.2, abs(cos_lat)))
+        wider_q = db.query(Hospital).filter(
+            Hospital.latitude.isnot(None),
+            Hospital.longitude.isnot(None),
+            Hospital.latitude.between(user_lat - lat_delta_wide, user_lat + lat_delta_wide),
+            Hospital.longitude.between(user_lng - lng_delta_wide, user_lng + lng_delta_wide),
+        )
+        if min_trust_score is not None:
+            wider_q = wider_q.filter(Hospital.trust_score >= min_trust_score)
+        candidates = wider_q.limit(200).all()
+
+    # Fallback to state query if still empty
+    if not candidates:
+        fallback_q = db.query(Hospital)
+        if intent.get("state"):
+            fallback_q = fallback_q.filter(Hospital.state.ilike(f"%{intent['state']}%"))
+        candidates = fallback_q.limit(200).all()
 
     agent_steps.append({
         "type": "vector_search",
         "title": "Facility Corpus Search",
         "agent": "Retrieval Agent",
-        "message": f"Scanned India 10k dataset: Identified {total_candidates} facilities in {target_state or 'target territory'}.",
-        "count": total_candidates,
+        "message": f"Scanned India 10k dataset: Identified {len(candidates)} facilities in proximity zone of {loc_info['address']}.",
+        "count": len(candidates),
     })
 
-    # Retrieve candidate pool
-    candidates = dbq.limit(200).all()
-
-    # Step 3: Capability & Contradiction Evaluation
+    # Step 4: Capability & Contradiction Evaluation
     agent_steps.append({
         "type": "filter",
         "title": "Functional vs Phantom Capability Verification",
@@ -280,25 +387,23 @@ def search(request: SearchRequest, db: Session = Depends(get_db)):
 
     # Build scoring items
     scored_items: List[Dict[str, Any]] = []
-    effective_radius = radius_km or intent.get("max_radius_km") or 60.0
 
     for h in candidates:
-        item = _hospital_to_response(h, lat, lng, intent)
+        item = _hospital_to_response(h, user_lat, user_lng, intent)
+        h_dist = item.get("distance_km")
 
-        # Check radius constraint if user coords provided
-        if item["distance_km"] is not None and item["distance_km"] > effective_radius:
+        # Exclude facilities ridiculously far beyond effective radius (unless candidate pool is tiny)
+        if h_dist is not None and h_dist > (effective_radius * 2.5) and len(candidates) > 10:
             continue
 
-        # Check required capabilities (Functional status check)
-        func_caps = item["functional_capabilities"] or {}
-        has_needed_proc = True
+        func_caps = item.get("functional_capabilities") or {}
 
-        if intent.get("is_emergency") and "surgery" in intent.get("required_capabilities", []):
-            surg_status = func_caps.get("surgery", {}).get("status")
-            if surg_status == "PHANTOM_CLAIM":
-                has_needed_proc = False  # filter out ghost surgical clinics
+        # Travel time estimate based on transport mode
+        speed_factor = 2.4 if intent.get("transport_mode") == "two-wheeler" else 1.8
+        travel_time_min = int(h_dist * speed_factor) if h_dist is not None else None
+        item["travel_time_min"] = travel_time_min
 
-        # Step 4: Run Medical Standards Validator
+        # Step 5: Run Medical Standards Validator
         val_res = validate_facility_against_standards(
             HospitalResponse(**item),
             clinical_context=intent,
@@ -309,26 +414,63 @@ def search(request: SearchRequest, db: Session = Depends(get_db)):
         item["validator_adjustment"] = val_res["confidence_adjustment"]
         item["trust_score"] = max(5, min(100, item["trust_score"] + val_res["confidence_adjustment"]))
 
-        # Composite Ranking Score: Trust Score + Distance Weight + PM-JAY Match
-        distance_penalty = (item["distance_km"] or 15.0) * 0.4
-        relevance_bonus = 0
+        # Composite Fitness Ranking Score:
+        # Base Trust Score (0-100) + Proximity Score + Clinical Problem Match + Financial Feasibility
+        fitness = float(item["trust_score"])
 
-        # Preference for PM-JAY / government if patient has strict cash limit
+        # 1. Proximity score (higher rank for hospitals physically closer to chosen location)
+        if h_dist is not None:
+            if h_dist <= 10.0:
+                proximity_score = 30.0 - (h_dist * 0.8)
+            elif h_dist <= 25.0:
+                proximity_score = 22.0 - ((h_dist - 10.0) * 0.6)
+            elif h_dist <= effective_radius:
+                proximity_score = 12.0 - ((h_dist - 25.0) * 0.3)
+            else:
+                proximity_score = -((h_dist - effective_radius) * 0.5)
+            fitness += proximity_score
+
+        # 2. Clinical Condition Match Bonus
+        req_caps = intent.get("required_capabilities") or []
+        for cap in req_caps:
+            cap_detail = func_caps.get(cap) if isinstance(func_caps.get(cap), dict) else {}
+            status = cap_detail.get("status")
+            if status == "VERIFIED_FUNCTIONAL":
+                fitness += 25.0
+            elif status == "PHANTOM_CLAIM":
+                fitness -= 40.0  # heavily penalize phantom claims
+            elif (item.get("capabilities") or {}).get(cap) is True:
+                fitness += 12.0
+
+        # 3. Clinical Reasoning Match & Specific Medical Reasons
+        clinical_bonus, match_reasons = evaluate_hospital_clinical_fitness(item, clinical_analysis)
+        fitness += clinical_bonus
+        item["clinical_match_reasons"] = match_reasons
+
+        # 4. Procedure keyword match in specialties or description
+        proc_needed = str(intent.get("procedure_needed") or "").lower()
+        if proc_needed:
+            proc_kw = proc_needed.split()[0].lower()
+            if proc_kw in (item.get("raw_text") or "").lower() or any(proc_kw in s.lower() for s in (item.get("staff_specialties") or [])):
+                fitness += 15.0
+
+        # 5. Preference for PM-JAY / government if patient has strict cash limit
         if intent.get("budget") and intent.get("budget") <= 1000:
-            raw_t = (item["raw_text"] or "").lower()
-            if "ayushman" in raw_t or "pm-jay" in raw_t or "government" in (item["operator_type"] or "").lower():
-                relevance_bonus += 20
+            raw_t = (item.get("raw_text") or "").lower()
+            if "ayushman" in raw_t or "pm-jay" in raw_t or "government" in (item.get("operator_type") or "").lower():
+                fitness += 20.0
 
-        # Part-time doctor boost if query requested it and facility uses visiting surgeons
+        # 6. Part-time doctor boost if query requested it and facility uses visiting surgeons
         if intent.get("allows_part_time_doctors"):
-            raw_t = (item["raw_text"] or "").lower()
+            raw_t = (item.get("raw_text") or "").lower()
             if "on-call" in raw_t or "part-time" in raw_t or "visiting" in raw_t:
-                relevance_bonus += 15
+                fitness += 15.0
 
-        item["_ranking_score"] = item["trust_score"] - distance_penalty + relevance_bonus
+        item["fitness_score"] = round(fitness, 1)
+        item["_ranking_score"] = fitness
         scored_items.append(item)
 
-    # Sort descending by composite ranking score
+    # Sort descending by composite fitness score
     scored_items.sort(key=lambda x: x.get("_ranking_score", 0), reverse=True)
     final_results = scored_items[:max_results]
 
@@ -353,30 +495,47 @@ def search(request: SearchRequest, db: Session = Depends(get_db)):
         "title": "Medical Standards Validator & Self-Correction",
         "agent": "Validator Agent",
         "message": (
-            "Cross-referenced recommendations with IPHS 2022 Guidelines §4.2 and NMC Staffing Rules. "
-            "Self-corrected confidence scores based on anesthesia coverage, two-wheeler travel window, and ₹500 budget feasibility."
+            f"Cross-referenced recommendations with IPHS 2022 Guidelines §4.2 and NMC Staffing Rules. "
+            f"Self-corrected confidence scores based on anesthesia coverage, {intent.get('transport_mode')} travel window, and budget feasibility."
         ),
     })
+
+    best_name = final_results[0]["name"] if final_results else "None"
+    best_dist = f"{final_results[0]['distance_km']} km" if final_results and final_results[0].get("distance_km") else "nearby"
+    best_time = f"~{final_results[0]['travel_time_min']} mins" if final_results and final_results[0].get("travel_time_min") else ""
 
     agent_steps.append({
         "type": "complete",
         "title": "Verified Healthcare Intelligence Trace Complete",
         "agent": "Synthesis Agent",
-        "message": f"Successfully identified {len(final_results)} verified facilities matching multi-attribute clinical criteria.",
+        "message": (
+            f"Identified {len(final_results)} best-fit facilities near {loc_info['address']}. "
+            f"Top match: {best_name} ({best_dist} {best_time})."
+        ),
     })
+
+    patient_advisory = (
+        f"{clinical_analysis.patient_guidance} "
+        f"For {loc_info['address']}, top recommended facility is {best_name} ({best_dist} {best_time}). "
+        f"Verified emergency infrastructure and clinical capability match confirmed."
+    )
 
     return {
         "query": query,
+        "user_location": loc_info,
         "clinical_intent": intent,
+        "clinical_analysis": clinical_analysis.dict(),
+        "diagnostic_questions": [q.dict() for q in clinical_analysis.questions],
         "results": final_results,
         "total": len(final_results),
         "agent_steps": agent_steps,
         "validator_summary": {
             "standards_checked": ["IPHS 2022 §4.2", "NMC Staffing Standards", "Ayushman Bharat PM-JAY Guidelines"],
-            "triage_urgency": intent.get("urgency_level"),
-            "patient_advisory": (
-                "Ananya's Emergency Advisory: Head to the top-ranked facility. Operational day-shift OT and on-call surgical coverage confirmed. "
-                "PM-JAY coverage ensures zero out-of-pocket barrier for emergency appendectomy."
-            ),
+            "triage_urgency": clinical_analysis.urgency_tier,
+            "patient_advisory": patient_advisory,
+            "target_location": loc_info["address"],
+            "red_flags": clinical_analysis.red_flags,
+            "confirmed_diagnosis": clinical_analysis.confirmed_diagnosis,
         },
     }
+

@@ -136,14 +136,39 @@ def _hospital_to_dict(h: Hospital, lat=None, lng=None) -> dict:
         "tavily_summary": h.tavily_summary,
         "capabilities": {k: v for k, v in (h.capabilities or {}).items() if v is not None},
         "functional_capabilities": h.functional_capabilities or {},
+        "facility_type": h.facility_type,
+        "operator_type": h.operator_type,
+        "staff_specialties": h.staff_specialties or [],
+        "equipment_list": h.equipment_list or [],
+        "procedures": h.procedures or [],
+        "unstructured_capabilities": h.unstructured_capabilities or [],
+        "raw_text": h.raw_text,
+        "icu_beds": h.icu_beds,
+        "ventilator_count": h.ventilator_count,
+        "accreditation_date": h.accreditation_date,
+        "recency_date": h.recency_date,
+        "desert_index": h.desert_index or 0.0,
         "validator_verdict": h.validator_verdict or "PASSED",
         "validator_notes": h.validator_notes,
+        "validator_adjustment": h.validator_adjustment or 0,
         "extraction_source": h.extraction_source or f"dataset.csv Row #{h.dataset_row_num}",
     }
 
 
-def _run_db_search(db: Session, state: str = None, limit: int = 500) -> list[Hospital]:
+def _run_db_search(db: Session, state: str = None, lat: float = None, lng: float = None, limit: int = 500) -> list[Hospital]:
     q = db.query(Hospital)
+    if lat is not None and lng is not None:
+        lat_delta = 70.0 / 111.0
+        cos_lat = math.cos(math.radians(lat))
+        lng_delta = 70.0 / (111.0 * max(0.2, abs(cos_lat)))
+        nearby = q.filter(
+            Hospital.latitude.isnot(None),
+            Hospital.longitude.isnot(None),
+            Hospital.latitude.between(lat - lat_delta, lat + lat_delta),
+            Hospital.longitude.between(lng - lng_delta, lng + lng_delta),
+        ).limit(limit).all()
+        if len(nearby) >= 10:
+            return nearby
     if state:
         q = q.filter(Hospital.state.ilike(f"%{state}%"))
     return q.limit(limit).all()
@@ -193,7 +218,7 @@ async def run_search(
 
         loop = asyncio.get_event_loop()
         candidates: list[Hospital] = await loop.run_in_executor(
-            None, lambda: _run_db_search(db, state)
+            None, lambda: _run_db_search(db, state, lat, lng)
         )
 
         # Step 3: Capability verification

@@ -27,16 +27,16 @@ def validate_facility_against_standards(
     Runs reliably offline and without API keys.
     """
     context = clinical_context or {}
-    procedure_needed = context.get("procedure_needed", "").lower()
+    procedure_needed = str(context.get("procedure_needed") or "").lower()
     budget = context.get("budget", None)
-    is_emergency = context.get("is_emergency", False)
+    is_emergency = bool(context.get("is_emergency", False))
     max_radius_km = context.get("max_radius_km", None)
-    urgency = context.get("urgency", "routine")
+    urgency = str(context.get("urgency") or context.get("urgency_level") or "routine").lower()
 
     caps = hospital.capabilities
     func_caps = hospital.functional_capabilities or {}
-    staff = [s.lower() for s in (hospital.staff_specialties or [])]
-    equipment = [e.lower() for e in (hospital.equipment_list or [])]
+    staff = [str(s).lower() for s in (hospital.staff_specialties or []) if s]
+    equipment = [str(e).lower() for e in (hospital.equipment_list or []) if e]
     raw = (hospital.raw_text or "").lower()
 
     issues: List[str] = []
@@ -57,7 +57,8 @@ def validate_facility_against_standards(
     # 2. Appendectomy / Surgical Emergency Standards (IPHS 2022 §4.2)
     if "append" in procedure_needed or "surg" in procedure_needed or "abdominal" in procedure_needed:
         standards.append("IPHS 2022 Guidelines §4.2 (Surgical & OT Standards)")
-        surg_status = func_caps.get("surgery", {}).get("status")
+        surg_cap = func_caps.get("surgery")
+        surg_status = surg_cap.get("status") if isinstance(surg_cap, dict) else None
 
         has_surgeon = any("surgeon" in s or "surgical" in s or "laparoscop" in s for s in staff)
         has_anesthetist = any("anesthesiolog" in s or "anaesthesiolog" in s or "anesthesia" in s for s in staff)
@@ -85,7 +86,8 @@ def validate_facility_against_standards(
     # 3. 24/7 Casualty & Night Roster Verification
     if is_emergency:
         standards.append("IPHS 2022 Casualty & Trauma Care Guidelines")
-        emer_status = func_caps.get("emergency_24h", {}).get("status")
+        emer_cap = func_caps.get("emergency_24h")
+        emer_status = emer_cap.get("status") if isinstance(emer_cap, dict) else None
         if emer_status == "PHANTOM_CLAIM":
             issues.append("Claims 24/7 Emergency but has 0 observation beds and no casualty doctor roster.")
             passed = False
@@ -159,6 +161,8 @@ async def run_validator_agent(
         hospital.validator_adjustment = val_result["confidence_adjustment"]
 
         # If issues found, append validator flag
+        if hospital.trust_flags is None:
+            hospital.trust_flags = []
         for issue in val_result["issues_found"]:
             hospital.trust_flags.append(f"[Validator Standards Flag] {issue}")
 
