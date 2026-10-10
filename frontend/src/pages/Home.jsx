@@ -3,22 +3,26 @@ import { motion, AnimatePresence, useInView } from 'framer-motion'
 import {
   MapPin, AlertTriangle, Database, ShieldCheck, Globe, ChevronRight,
   ArrowDown, Sparkles, HeartPulse, Stethoscope, Clock, ShieldAlert,
-  Compass, RefreshCw, CheckCircle2
+  Compass, RefreshCw, CheckCircle2, Navigation, Layers, ListFilter
 } from 'lucide-react'
 import SearchBar from '../components/SearchBar'
 import HospitalCard from '../components/HospitalCard'
 import AgentThinkingPanel from '../components/AgentThinkingPanel'
-import { searchHospitals } from '../utils/api'
+import SearchResultsMap from '../components/SearchResultsMap'
+import ClinicalTriagePanel from '../components/ClinicalTriagePanel'
+import { searchHospitals, detectUserLocation } from '../utils/api'
 
 const ANANYA_QUERY = 'Nearest facility in rural Bihar that can perform an emergency appendectomy and typically leverages part-time doctors (₹500 cash, Tuesday 2:30 PM)'
 
 const EXAMPLE_QUERIES = [
-  { label: "⚡ Ananya's Emergency Appendectomy", query: ANANYA_QUERY },
-  { label: "Dialysis Deserts (UP)", query: 'Districts in UP with no dialysis center within 50km' },
-  { label: "Functional ICU (Rajasthan)", query: 'ICU-capable hospitals in Rajasthan with functional ventilators and 24/7 resident doctor' },
-  { label: "Oncology Deserts (Bihar)", query: 'High-risk oncology deserts in Bihar with zero cancer care within 75km' },
-  { label: "Trauma & Blood Bank (Patna)", query: 'Emergency trauma centers near Patna with functional OT and blood bank' },
+  { label: "⚡ Ananya's Emergency Appendectomy", query: ANANYA_QUERY, location: "Saharsa, Bihar" },
+  { label: "🇮🇳 Hinglish: Pet Dard & Ulti", query: 'mere pet ke dahine taraf kal raat se bohot tez dard ho raha hai aur ulti bhi aa rahi hai', location: "Saharsa, Bihar" },
+  { label: "🚨 Chest Pressure & Cold Sweats", query: 'Sudden crushing chest pain radiating to left arm with severe cold sweating and dizziness', location: "Patna Urban" },
+  { label: "🫁 Severe Breathlessness (SpO2 Drop)", query: 'Elderly patient having severe breathing distress, wheezing, and unable to speak in sentences', location: "New Delhi" },
+  { label: "🏍️ Road Trauma & Bleeding", query: 'Bike accident with heavy bleeding and compound leg bone deformity, cannot bear weight', location: "Lalganj, Vaishali" },
+  { label: "Dialysis Deserts (UP)", query: 'Districts in UP with no dialysis center within 50km', location: "Bahraich, UP" },
 ]
+
 
 const STATS = [
   { label: 'Facilities Indexed', value: '10,054', sub: 'India 10k Dataset' },
@@ -66,14 +70,58 @@ function FadeInSection({ children, delay = 0 }) {
 
 export default function Home() {
   const [query, setQuery] = useState('')
+  const [locationText, setLocationText] = useState('')
+  const [userCoords, setUserCoords] = useState({ lat: null, lng: null })
+  const [locationSource, setLocationSource] = useState('')
+  const [isDetectingLocation, setIsDetectingLocation] = useState(false)
+  const [userLocationData, setUserLocationData] = useState(null)
+  const [selectedHospital, setSelectedHospital] = useState(null)
+  const [viewMode, setViewMode] = useState('both') // 'both', 'list', 'map'
+
   const [results, setResults] = useState([])
   const [agentSteps, setAgentSteps] = useState([])
   const [isSearching, setIsSearching] = useState(false)
   const [hasSearched, setHasSearched] = useState(false)
   const [validatorSummary, setValidatorSummary] = useState(null)
+  const [clinicalAnalysis, setClinicalAnalysis] = useState(null)
+  const [diagnosticQuestions, setDiagnosticQuestions] = useState([])
+  const [diagnosticAnswers, setDiagnosticAnswers] = useState({})
+  const [isRefiningQuestions, setIsRefiningQuestions] = useState(false)
   const searchRef = useRef(null)
 
-  const handleSearch = async (q) => {
+  const handleAutoDetect = () => {
+    setIsDetectingLocation(true)
+    if (typeof window !== 'undefined' && navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const lat = pos.coords.latitude
+          const lng = pos.coords.longitude
+          setUserCoords({ lat, lng })
+          setLocationText(`GPS (${lat.toFixed(2)}°N, ${lng.toFixed(2)}°E)`)
+          setLocationSource('gps')
+          setIsDetectingLocation(false)
+        },
+        async (err) => {
+          console.warn('Geolocation denied or timed out, falling back to IP detection:', err.message)
+          const data = await detectUserLocation()
+          setUserCoords({ lat: data.lat, lng: data.lng })
+          setLocationText(data.address || `${data.city}, ${data.state}`)
+          setLocationSource(data.source)
+          setIsDetectingLocation(false)
+        },
+        { timeout: 7000 }
+      )
+    } else {
+      detectUserLocation().then((data) => {
+        setUserCoords({ lat: data.lat, lng: data.lng })
+        setLocationText(data.address || `${data.city}, ${data.state}`)
+        setLocationSource(data.source)
+        setIsDetectingLocation(false)
+      })
+    }
+  }
+
+  const handleSearch = async (q, locOverride, answersOverride) => {
     const searchQuery = q || query
     if (!searchQuery.trim()) return
 
@@ -82,17 +130,43 @@ export default function Home() {
     setResults([])
     setAgentSteps([])
     setValidatorSummary(null)
+    setSelectedHospital(null)
 
     setTimeout(() => {
       searchRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }, 100)
 
+    const activeAnswers = answersOverride || locOverride?.diagnostic_answers || diagnosticAnswers
+
+    const locPayload = {
+      ...(locOverride || {}),
+      user_location: locOverride?.user_location !== undefined ? locOverride.user_location : (locationText || null),
+      lat: locOverride?.lat !== undefined ? locOverride.lat : userCoords.lat,
+      lng: locOverride?.lng !== undefined ? locOverride.lng : userCoords.lng,
+      auto_detect: !locationText && !userCoords.lat,
+      diagnostic_answers: Object.keys(activeAnswers || {}).length > 0 ? activeAnswers : null,
+    }
+
     try {
-      const data = await searchHospitals(searchQuery, (step) => {
-        setAgentSteps((prev) => [...prev, step])
-      })
+      const data = await searchHospitals(
+        searchQuery,
+        (step) => {
+          setAgentSteps((prev) => [...prev, step])
+        },
+        locPayload
+      )
       setResults(data.results || [])
       setValidatorSummary(data.validator_summary || null)
+      if (data.clinical_analysis) setClinicalAnalysis(data.clinical_analysis)
+      if (data.diagnostic_questions) setDiagnosticQuestions(data.diagnostic_questions)
+
+      if (data.user_location) {
+        setUserLocationData(data.user_location)
+        if (!locationText) {
+          setLocationText(data.user_location.address)
+          setLocationSource(data.user_location.source)
+        }
+      }
     } catch (err) {
       console.error('Search failed:', err)
       setAgentSteps((prev) => [...prev, { type: 'error', message: 'Search failed. Please try again.' }])
@@ -101,9 +175,24 @@ export default function Home() {
     }
   }
 
+  const handleDiagnosticAnswerSubmit = async (answers) => {
+    setDiagnosticAnswers(answers)
+    setIsRefiningQuestions(true)
+    await handleSearch(query, null, answers)
+    setIsRefiningQuestions(false)
+  }
+
+
   const runAnanyaScenario = () => {
     setQuery(ANANYA_QUERY)
-    handleSearch(ANANYA_QUERY)
+    setLocationText('Saharsa, Bihar')
+    setUserCoords({ lat: 25.8834, lng: 86.5851 })
+    setLocationSource('scenario')
+    handleSearch(ANANYA_QUERY, {
+      user_location: 'Saharsa, Bihar',
+      lat: 25.8834,
+      lng: 86.5851,
+    })
   }
 
   return (
@@ -180,6 +269,11 @@ export default function Home() {
               setQuery={setQuery}
               onSearch={handleSearch}
               isSearching={isSearching}
+              locationText={locationText}
+              setLocationText={setLocationText}
+              onAutoDetectLocation={handleAutoDetect}
+              isDetectingLocation={isDetectingLocation}
+              locationSource={locationSource}
             />
 
             {/* Example Queries */}
@@ -189,7 +283,15 @@ export default function Home() {
                 {EXAMPLE_QUERIES.map((item) => (
                   <button
                     key={item.label}
-                    onClick={() => { setQuery(item.query); handleSearch(item.query) }}
+                    onClick={() => {
+                      setQuery(item.query)
+                      if (item.location) {
+                        setLocationText(item.location)
+                        handleSearch(item.query, { user_location: item.location })
+                      } else {
+                        handleSearch(item.query)
+                      }
+                    }}
                     className="text-xs bg-white hover:bg-medmap-50 border border-slate-200 hover:border-medmap-300 text-slate-700 hover:text-medmap-700 px-3 py-1.5 rounded-lg transition-all duration-150 text-left font-medium shadow-2xs"
                   >
                     {item.label}
@@ -266,6 +368,11 @@ export default function Home() {
                 setQuery={setQuery}
                 onSearch={handleSearch}
                 isSearching={isSearching}
+                locationText={locationText}
+                setLocationText={setLocationText}
+                onAutoDetectLocation={handleAutoDetect}
+                isDetectingLocation={isDetectingLocation}
+                locationSource={locationSource}
               />
             </div>
           </div>
@@ -284,8 +391,18 @@ export default function Home() {
                 <AgentThinkingPanel steps={agentSteps} isStreaming={isSearching} />
               </div>
 
-              {/* Results & Validator Summary */}
+              {/* Results, Interactive Map & Validator Summary */}
               <div className="lg:col-span-2 space-y-4">
+                {/* Clinical NLP Reasoning & Diagnostic Triage Panel */}
+                {(clinicalAnalysis || diagnosticQuestions.length > 0) && (
+                  <ClinicalTriagePanel
+                    clinicalAnalysis={clinicalAnalysis}
+                    diagnosticQuestions={diagnosticQuestions}
+                    onAnswerSubmit={handleDiagnosticAnswerSubmit}
+                    isRefining={isRefiningQuestions}
+                  />
+                )}
+
                 {/* Validator Summary Card */}
                 {validatorSummary && (
                   <motion.div
@@ -293,6 +410,7 @@ export default function Home() {
                     animate={{ opacity: 1, y: 0 }}
                     className="card p-4 bg-gradient-to-r from-emerald-50/70 to-sky-50/70 border-emerald-200 shadow-xs"
                   >
+
                     <div className="flex items-start gap-3">
                       <ShieldCheck className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
                       <div className="space-y-1">
@@ -322,6 +440,67 @@ export default function Home() {
                   </motion.div>
                 )}
 
+                {/* Target Location Grounding & View Mode Switcher */}
+                {userLocationData && results.length > 0 && (
+                  <div className="flex items-center justify-between bg-sky-50/80 border border-sky-200/90 rounded-2xl px-4 py-2.5 text-xs text-slate-700 shadow-2xs flex-wrap gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Navigation className="w-4 h-4 text-sky-600 flex-shrink-0" />
+                      <span className="font-semibold text-slate-900">
+                        Proximity Grounded To:
+                      </span>
+                      <span className="font-bold text-sky-900 bg-white/90 px-2 py-0.5 rounded border border-sky-300">
+                        {userLocationData.address}
+                      </span>
+                      <span className="text-[10px] font-mono text-slate-500 uppercase bg-sky-100/70 px-1.5 py-0.5 rounded">
+                        [{userLocationData.source}]
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-1 bg-white p-0.5 rounded-xl border border-slate-200">
+                      <button
+                        onClick={() => setViewMode('both')}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+                          viewMode === 'both' ? 'bg-medmap-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        Map &bull; List
+                      </button>
+                      <button
+                        onClick={() => setViewMode('list')}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+                          viewMode === 'list' ? 'bg-medmap-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        List Only
+                      </button>
+                      <button
+                        onClick={() => setViewMode('map')}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+                          viewMode === 'map' ? 'bg-medmap-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        Map Only
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Interactive Leaflet Search Results Map */}
+                {results.length > 0 && (viewMode === 'both' || viewMode === 'map') && (
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.98 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{ duration: 0.3 }}
+                  >
+                    <SearchResultsMap
+                      userLocation={userLocationData}
+                      results={results}
+                      selectedHospital={selectedHospital}
+                      onSelectHospital={(hosp) => setSelectedHospital(hosp)}
+                    />
+                  </motion.div>
+                )}
+
                 {isSearching && results.length === 0 && (
                   <div className="card p-10 text-center">
                     <div className="w-10 h-10 border-3 border-medmap-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
@@ -330,12 +509,12 @@ export default function Home() {
                   </div>
                 )}
 
-                {results.length > 0 && (
+                {results.length > 0 && (viewMode === 'both' || viewMode === 'list') && (
                   <>
                     <div className="flex items-center justify-between py-1">
                       <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                        <span>{results.length} Verified Facilities</span>
-                        <span className="text-xs font-normal text-slate-500 font-mono">(Ranked by Trust Score &times; Proximity)</span>
+                        <span>{results.length} Best-Fit Facilities</span>
+                        <span className="text-xs font-normal text-slate-500 font-mono">(Ranked by Distance &times; Trust Score &times; Capabilities)</span>
                       </h2>
                     </div>
 
@@ -344,7 +523,11 @@ export default function Home() {
                         key={hospital.id || i}
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: i * 0.05 }}
+                        transition={{ delay: i * 0.04 }}
+                        onClick={() => setSelectedHospital(hospital)}
+                        className={`cursor-pointer transition-all rounded-2xl ${
+                          selectedHospital?.id === hospital.id ? 'ring-2 ring-medmap-500 ring-offset-2' : ''
+                        }`}
                       >
                         <HospitalCard hospital={hospital} rank={i + 1} />
                       </motion.div>

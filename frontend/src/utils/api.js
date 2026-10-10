@@ -295,32 +295,77 @@ const GENERAL_MOCK_RESULTS = [
   },
 ]
 
+// ── Location Services (Auto-Detection & Manual Geocoding) ──────────────────
+
+export async function detectUserLocation() {
+  try {
+    const res = await api.get('/search/detect_location')
+    return res.data
+  } catch (err) {
+    console.warn('Backend detect_location unavailable, using browser GPS fallback:', err)
+    return {
+      lat: 25.6120,
+      lng: 85.1580,
+      city: 'Patna',
+      district: 'Patna',
+      state: 'Bihar',
+      address: 'Patna, Bihar (Reference Default)',
+      source: 'fallback',
+    }
+  }
+}
+
+export async function geocodeLocation(q) {
+  try {
+    const res = await api.get('/search/geocode', { params: { q } })
+    return res.data
+  } catch (err) {
+    console.warn('Geocoding request failed:', err)
+    return null
+  }
+}
+
 // ── Search Agent Execution ───────────────────────────────────────────────────
 
-export async function searchHospitals(query, onStep) {
+export async function searchHospitals(query, onStep, locationOptions = {}) {
   const isAnanya = query.toLowerCase().includes('ananya') ||
                    query.toLowerCase().includes('appendectomy') ||
                    query.toLowerCase().includes('bihar')
 
   if (import.meta.env.VITE_USE_MOCK === 'true') {
-    return simulateAgentSearch(query, onStep, isAnanya)
+    return simulateAgentSearch(query, onStep, isAnanya, locationOptions)
   }
 
   // Initial immediate feedback
   onStep({
-    type: 'query_parse',
-    title: 'Clinical Intent & Triage Decomposer',
-    agent: 'Triage Agent',
-    message: `Decomposing query: "${query}" into clinical urgency, geography, and constraints`,
+    type: 'location_detect',
+    title: 'Geospatial Lock Initializing',
+    agent: 'Geospatial Agent',
+    message: locationOptions.user_location
+      ? `Locking coordinates for manual location: "${locationOptions.user_location}"`
+      : locationOptions.lat
+      ? `Acquired GPS location: (${locationOptions.lat.toFixed(4)}°N, ${locationOptions.lng.toFixed(4)}°E)`
+      : 'Resolving user real-time location via IP & GPS network...',
   })
 
   try {
-    const response = await api.post('/search', { query, max_results: 10 })
+    const payload = {
+      query,
+      max_results: 10,
+      user_location: locationOptions.user_location || null,
+      lat: locationOptions.lat ?? null,
+      lng: locationOptions.lng ?? null,
+      radius_km: locationOptions.radius_km ?? null,
+      auto_detect_location: locationOptions.auto_detect ?? false,
+      diagnostic_answers: locationOptions.diagnostic_answers || null,
+    }
+
+    const response = await api.post('/search', payload)
     const data = response.data
 
     if (data.agent_steps?.length) {
-      for (const step of data.agent_steps.slice(1)) {
-        await new Promise((r) => setTimeout(r, 220))
+      for (const step of data.agent_steps) {
+        await new Promise((r) => setTimeout(r, 180))
         onStep(step)
       }
     }
@@ -329,12 +374,15 @@ export async function searchHospitals(query, onStep) {
       results: data.results || [],
       total: data.total || 0,
       query,
+      user_location: data.user_location,
       clinical_intent: data.clinical_intent,
+      clinical_analysis: data.clinical_analysis,
+      diagnostic_questions: data.diagnostic_questions || [],
       validator_summary: data.validator_summary,
     }
   } catch (err) {
     console.warn('Backend API unavailable, executing local agentic simulation:', err.message)
-    return simulateAgentSearch(query, onStep, isAnanya)
+    return simulateAgentSearch(query, onStep, isAnanya, locationOptions)
   }
 }
 
@@ -389,18 +437,107 @@ async function simulateAgentSearch(query, onStep, isAnanya) {
     onStep(steps[i])
   }
 
-  const results = isAnanya ? ANANYA_SCENARIO_RESULTS : GENERAL_MOCK_RESULTS
+  const questions = [
+    {
+      id: 'q_pain_migration',
+      question: 'Has the pain moved or localized to your lower right abdomen, or does it worsen when walking or coughing?',
+      options: [
+        'Yes, shifted to lower right and hurts when walking',
+        'No, severe pain all over the stomach',
+        'Upper stomach near ribs / heartburn',
+        'Lower pelvic area / groin',
+      ],
+      rationale: "Identifies classic McBurney's point migration indicative of acute appendicitis vs generalized dyspepsia.",
+      category: 'symptom_localization',
+    },
+    {
+      id: 'q_fever_vomiting',
+      question: 'Are you experiencing a fever, nausea, or recurrent vomiting?',
+      options: [
+        'Both fever (>100°F) and vomiting',
+        'Vomiting only, no fever',
+        'Mild nausea only',
+        'Neither fever nor vomiting',
+      ],
+      rationale: 'High fever with persistent vomiting indicates active intra-abdominal inflammation.',
+      category: 'systemic_severity',
+    },
+    {
+      id: 'q_food_tolerance',
+      question: 'When did you last eat or drink, and are you able to keep fluids down?',
+      options: [
+        'Cannot keep anything down (vomiting everything)',
+        'Ate 4-6 hours ago, feeling nauseous',
+        'Can drink fluids without vomiting',
+        'Normal appetite despite pain',
+      ],
+      rationale: 'Critical for surgical anesthesia readiness and assessing dehydration / shock risk.',
+      category: 'surgical_prerequisite',
+    },
+    {
+      id: 'q_urinary_bowel',
+      question: 'Have you noticed any severe burning while urinating, blood in urine, or missed periods (if female)?',
+      options: [
+        'Burning urination or dark urine',
+        'Severe diarrhea or blood in stool',
+        'Missed period / possibility of pregnancy',
+        'None of these symptoms',
+      ],
+      rationale: 'Differentiates appendicitis from urinary tract infection or ectopic pregnancy.',
+      category: 'differential_rule_out',
+    },
+  ]
+
+  const hasAnswers = Boolean(locationOptions?.diagnostic_answers && Object.keys(locationOptions.diagnostic_answers).length > 0)
+
+  const clinical_analysis = {
+    primary_complaint: isAnanya ? 'Acute Abdominal Pain / Suspected Surgical Emergency' : 'Clinical Triage Evaluation',
+    urgency_tier: 'CRITICAL_EMERGENCY',
+    urgency_color: 'red',
+    differential_diagnosis: [
+      'Acute Appendicitis (High Risk if localized to RLQ)',
+      'Perforated Peptic Ulcer / Peritonitis',
+      'Acute Cholecystitis / Biliary Colic',
+      'Acute Enteritis / Gastroenteritis',
+    ],
+    confirmed_diagnosis: hasAnswers ? 'Acute Appendicitis (Refined by Patient Responses)' : null,
+    red_flags: [
+      "McBurney's point tenderness with rebound pain",
+      'Continuous vomiting with fever',
+      'Pain worsening with movement or cough',
+    ],
+    required_capabilities: ['surgery', 'emergency_24h'],
+    required_equipment: ['Operation Theatre (OT)', 'Ultrasound Abdomen', 'General Surgeon on Call'],
+    patient_guidance: 'Keep patient strictly fasting (NPO). Do not administer strong pain medications or heat pads before a surgeon examines the abdomen.',
+    clarification_summary: hasAnswers ? 'Refined with patient inputs: localized RLQ pain and systemic emesis confirmed.' : null,
+    questions,
+  }
 
   return {
     results,
     total: results.length,
     query,
+    clinical_analysis,
+    diagnostic_questions: questions,
     validator_summary: {
       standards_checked: ['IPHS 2022 Guidelines §4.2', 'NMC Staffing Standards', 'PM-JAY Cashless Package Code SG001'],
       patient_advisory: 'Emergency Appendectomy Advisory: Head to Arogya Mandir Hospital (20.4 km away). Operational day-shift OT and visiting surgeon confirmed. Cashless under Ayushman Bharat PM-JAY.',
+      confirmed_diagnosis: clinical_analysis.confirmed_diagnosis,
+      red_flags: clinical_analysis.red_flags,
     },
   }
 }
+
+export async function triageQuery(query, answers = {}) {
+  try {
+    const response = await api.post('/search/triage', { query, diagnostic_answers: answers })
+    return response.data
+  } catch (err) {
+    console.warn('Triage API unavailable, returning local triage data:', err.message)
+    return null
+  }
+}
+
 
 // ── Hospitals List (Map Data) ────────────────────────────────────────────────
 

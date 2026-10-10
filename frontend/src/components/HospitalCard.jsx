@@ -26,11 +26,13 @@ export default function HospitalCard({ hospital, rank }) {
     trust_score, trust_flags = [], detailed_flags = [], citations = [],
     capabilities = {}, functional_capabilities = {}, bed_count, number_doctors,
     accreditation, tavily_verified, tavily_summary, extraction_source, distance_km,
+    travel_time_min, fitness_score, clinical_match_reasons = [],
     validator_verdict, validator_notes,
   } = hospital
 
   const isFailed = validator_verdict === 'FAILED_STANDARDS' || trust_score < 40
   const isConditional = validator_verdict === 'PASSED_WITH_CONDITIONS'
+
 
   return (
     <div className={`card overflow-hidden transition-all duration-200 border ${
@@ -71,8 +73,9 @@ export default function HospitalCard({ hospital, rank }) {
                 {distance_km && (
                   <>
                     <span className="text-gray-300">|</span>
-                    <span className="text-medmap-700 font-semibold bg-medmap-50 px-1.5 py-0.5 rounded border border-medmap-200">
-                      {distance_km} km
+                    <span className="text-medmap-700 font-semibold bg-medmap-50 px-1.5 py-0.5 rounded border border-medmap-200 inline-flex items-center gap-1">
+                      <span>{distance_km} km</span>
+                      {travel_time_min && <span className="text-[10px] text-slate-500 font-normal">(~{travel_time_min} mins)</span>}
                     </span>
                   </>
                 )}
@@ -147,7 +150,26 @@ export default function HospitalCard({ hospital, rank }) {
           </div>
         </div>
 
+        {/* Clinical Diagnostic Fit Rationale */}
+        {clinical_match_reasons && clinical_match_reasons.length > 0 && (
+          <div className="mb-3 p-2.5 rounded-xl bg-sky-50/80 border border-sky-200/90 text-xs">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-sky-800 mb-1 flex items-center gap-1.5">
+              <Stethoscope className="w-3 h-3 text-sky-600" />
+              <span>Clinical Fit Rationale (Diagnostic Match)</span>
+            </div>
+            <div className="space-y-1">
+              {clinical_match_reasons.map((reason, idx) => (
+                <div key={idx} className="flex items-start gap-1.5 text-slate-700 text-[11px]">
+                  <span className="text-sky-600 font-bold">•</span>
+                  <span>{reason}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Quick Highlights / Badges */}
+
         <div className="flex items-center gap-2 flex-wrap mb-2">
           {bed_count !== null && bed_count !== undefined && (
             <span className="text-xs bg-slate-100 border border-slate-200 px-2.5 py-1 rounded-full text-slate-700 font-mono">
