@@ -6,7 +6,7 @@ import logging
 import os
 from pathlib import Path
 
-from routers import search, hospitals, dashboard
+from routers import search, hospitals, dashboard, eval
 from config import settings
 from database import init_db, SessionLocal
 from models import Hospital
@@ -79,6 +79,7 @@ app.add_middleware(
 app.include_router(search.router, prefix="/api/search", tags=["Search"])
 app.include_router(hospitals.router, prefix="/api/hospitals", tags=["Hospitals"])
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["Dashboard"])
+app.include_router(eval.router, prefix="", tags=["Eval"])
 
 
 @app.get("/health")

@@ -1,0 +1,3 @@
+{"scenario_id": "eval_edge_000", "action": "skip", "reason": "marketing_consent is false; promotional send blocked"}
+{"scenario_id": "eval_edge_001", "action": "skip", "reason": "Merchant distance exceeds practical walk radius for the intent"}
+{"scenario_id": "eval_edge_002", "action": "skip", "reason": "Inventory signal low; avoid over-promising"}
