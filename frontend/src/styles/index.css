@@ -1,0 +1,115 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-white text-slate-900 font-sans antialiased;
+    margin: 0;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-gray-100;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-gray-300 rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-400;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-white border border-gray-200 rounded-2xl shadow-sm;
+  }
+
+  .card-muted {
+    @apply bg-gray-50 border border-gray-200 rounded-2xl;
+  }
+
+  /* Keep glass-card for any remaining references */
+  .glass-card {
+    @apply bg-white border border-gray-200 rounded-2xl shadow-sm;
+  }
+
+  .trust-badge-high {
+    @apply bg-emerald-50 text-emerald-700 border border-emerald-200;
+  }
+
+  .trust-badge-medium {
+    @apply bg-amber-50 text-amber-700 border border-amber-200;
+  }
+
+  .trust-badge-low {
+    @apply bg-red-50 text-red-700 border border-red-200;
+  }
+
+  .btn-primary {
+    @apply bg-medmap-600 hover:bg-medmap-700 text-white font-semibold px-6 py-3 rounded-xl transition-all duration-200 shadow-sm;
+  }
+
+  .btn-ghost {
+    @apply bg-white hover:bg-gray-50 text-slate-700 font-medium px-4 py-2 rounded-lg transition-all duration-200 border border-gray-200;
+  }
+
+  .input-field {
+    @apply bg-white border border-gray-300 text-slate-900 placeholder-slate-400 rounded-xl px-4 py-3 w-full focus:outline-none focus:border-medmap-500 focus:ring-2 focus:ring-medmap-500/20 transition-all duration-200;
+  }
+
+  .section-label {
+    @apply text-xs font-semibold tracking-widest uppercase text-medmap-600;
+  }
+}
+
+/* Leaflet map */
+.leaflet-container {
+  background: #f8fafc !important;
+}
+
+.leaflet-control-attribution {
+  font-size: 10px !important;
+}
+
+/* Agent thinking cursor blink */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.cursor-blink::after {
+  content: '▊';
+  animation: blink 1s infinite;
+  color: #0284c7;
+}
+
+/* Scroll reveal utility */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 0.5s ease-out forwards;
+}

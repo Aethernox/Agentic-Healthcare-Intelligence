@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Environment
+.env
+.env.local
+.env.production
+*.env
+
+# Data
+data/*.xlsx
+data/*.csv
+data/*.parquet
+data/*.db
+*.db
+
+# IDE
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Docker
+*.log
+
+# MLflow
+mlruns/
+mlartifacts/
